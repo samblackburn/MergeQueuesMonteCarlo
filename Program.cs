@@ -1,30 +1,33 @@
-﻿var events = new PriorityQueue<Build, DateTime>();
+﻿using System.Diagnostics;
+
+var events = new PriorityQueue<Build, DateTime>();
 var repo = new Repo(events);
 repo.PushNewBranch(DateTime.Today);
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(3));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(6));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(9));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(12));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(15));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(18));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(21));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(24));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromHours(27));
+repo.PushNewBranch(DateTime.Today + TimeSpan.FromMinutes(3));
+repo.PushNewBranch(DateTime.Today + TimeSpan.FromMinutes(6));
+var maxParallelBranches = 0;
 
-
-while (events.Count > 0)
+for(int i=0; i<400; i++)
 {
+    if (events.Count == 0)
+    {
+        Console.WriteLine("Pipeline stalled, all builds failed.");
+        break;
+    }
+    maxParallelBranches = Math.Max(maxParallelBranches, repo.Branches.Count);
     var e = events.Dequeue();
     e.OnFinished();
 }
 
-Console.WriteLine($"{Build.NextBuildId} builds were started and {repo.NextBranchId - repo.Branches.Count} branches were merged.");
+Console.WriteLine($"{Build.NextBuildId} builds were started and {repo.NextBranchId - repo.Branches.Count} branches were merged. There were {Build.NextBuildId/(repo.NextBranchId - repo.Branches.Count)} builds per merge.");
+Console.WriteLine($"Maximum parallel branches: {maxParallelBranches}");
+
 
 public class Build(PriorityQueue<Build, DateTime> events, Action<DateTime> onSuccess, Action<DateTime> onFailure)
 {
     public static int NextBuildId { get; private set; }
-    private static readonly TimeSpan Duration = TimeSpan.FromHours(2);
-    private static readonly double SuccessRate = 0.5;
+    protected virtual TimeSpan Duration => TimeSpan.FromHours(2);
+    protected virtual double SuccessRate => 0.5;
 
     private readonly int _buildId = ++NextBuildId;
     private DateTime _endTime;
@@ -59,28 +62,51 @@ public class Build(PriorityQueue<Build, DateTime> events, Action<DateTime> onSuc
     }
 }
 
-public class RenovateBranch(int branchId, PriorityQueue<Build, DateTime> events, HashSet<RenovateBranch> repo)
+internal class RetryBuild : Build
+{
+    public RetryBuild(PriorityQueue<Build,DateTime> events, Action<DateTime> onSuccess, Action<DateTime> onFailure) : base(events, onSuccess, onFailure)
+    {
+    }
+    
+    protected override TimeSpan Duration => TimeSpan.FromMinutes(30);
+    protected override double SuccessRate => 0.9;
+}
+
+public class RenovateBranch(int branchId, PriorityQueue<Build, DateTime> events, Repo repo)
 {
     private Build? _currentBuild; 
 
     public void Push(DateTime startTime)
     {
-        repo.Add(this);
         if (_currentBuild != null) _currentBuild.IsObsolete = true;
         
         Console.WriteLine($"{startTime}: Branch #{branchId} pushed");
-        _currentBuild = new Build(events, OnSuccess, _ => { });
+        _currentBuild = new Build(events, OnSuccess, OnFailure);
         _currentBuild.Start(startTime);
+    }
+
+    private void OnFailure(DateTime obj)
+    {
+        Debug.Assert(_currentBuild != null, "There must be a build for it to have failed.");
+        
+        // At 9am the next day, a human hits run on the couple of projects that failed
+        var nextMorning = obj.Date + TimeSpan.FromHours(9) + TimeSpan.FromDays(1);
+        Console.WriteLine($"{nextMorning}: Manual retry for branch #{branchId}");
+        _currentBuild = new RetryBuild(events, OnSuccess, OnFailure);
+        _currentBuild.Start(nextMorning);
     }
 
     private void OnSuccess(DateTime time)
     {
-        Console.WriteLine($"branch #{branchId} merged and deleted. Rebasing {repo.Count} other branches...");
-        repo.Remove(this);
-        foreach (var branch in repo)
+        Console.WriteLine($"branch #{branchId} merged and deleted. Rebasing {repo.Branches.Count} other branches...");
+        repo.Branches.Remove(this);
+        foreach (var branch in repo.Branches)
         {
             branch.Push(time);
         }
+        
+        // At this point Renovate will create a new branch from the rate-limited queue
+        repo.PushNewBranch(time);
     }
 }
 
@@ -91,10 +117,8 @@ public class Repo(PriorityQueue<Build, DateTime> events)
 
     public void PushNewBranch(DateTime startTime)
     {
-        var renovateBranch = new RenovateBranch(NextBranchId++, events, Branches);
+        var renovateBranch = new RenovateBranch(NextBranchId++, events, this);
         renovateBranch.Push(startTime);
         Branches.Add(renovateBranch);
     }
 }
-
-
