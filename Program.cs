@@ -2,9 +2,7 @@
 
 var events = new PriorityQueue<IEvent, DateTime>();
 var repo = new Repo(events);
-repo.PushNewBranch(DateTime.Today);
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromMinutes(3));
-repo.PushNewBranch(DateTime.Today + TimeSpan.FromMinutes(6));
+repo.RenovateCreatesNewBranches(DateTime.Today);
 var firstTimeToManuallyCheckBuilds = DateTime.Today + TimeSpan.FromHours(9);
 events.Enqueue(new RetryFailingBuildsEvent(events, firstTimeToManuallyCheckBuilds, repo), firstTimeToManuallyCheckBuilds);
 var maxParallelBranches = 0;
@@ -27,7 +25,6 @@ var builds = BuildStartedEvent.NextBuildId;
 Console.WriteLine($"{builds} builds were started and {mergedBranches} branches were merged. ");
 Console.WriteLine($"There were {builds/mergedBranches} branch-or-merge-queue builds per merge.");
 Console.WriteLine($"Maximum parallel branches: {maxParallelBranches}");
-
 
 public class BuildStartedEvent(PriorityQueue<IEvent, DateTime> events, Action<DateTime> onSuccess, Action<DateTime> onFailure) : IEvent
 {
@@ -99,8 +96,7 @@ public class BranchWithMergeQueuesEnabled(int branchId, PriorityQueue<IEvent, Da
 
     private void OnSuccess(DateTime time)
     {
-        Console.WriteLine($"branch #{branchId} added to merge queue");
-        queue.Add(this, time);
+        queue.Add(this, time, $"branch #{branchId} added to merge queue");
     }
 
     public void ManualRetry(DateTime checkTime)
@@ -126,17 +122,18 @@ public class MergeQueue(PriorityQueue<IEvent, DateTime> events)
     public Dictionary<BranchWithMergeQueuesEnabled, BuildStatus> Statuses = new();
     public Repo Repo { get; set; }
 
-    public void Add(BranchWithMergeQueuesEnabled pr, DateTime time)
+    public void Add(BranchWithMergeQueuesEnabled pr, DateTime time, string message)
     {
-        Queue.Add(pr);
-        Statuses.Add(pr, BuildStatus.Pending);
-        
-        events.Enqueue(new MergeQueueBuildStartedEvent(events, _ => OnSuccess(pr), finishTime => RemoveBranchFromQueue(pr, finishTime)), time);
+        if (!Queue.Contains(pr)) Queue.Add(pr);
+        Statuses[pr] = BuildStatus.Pending;
+
+        var build = new MergeQueueBuildStartedEvent(events, t => OnSuccess(pr, t), finishTime => RemoveBranchFromQueue(pr, finishTime));
+        build.Start(time, $"{message}; merge queue size is now {Queue.Count}");
     }
 
     private void RemoveBranchFromQueue(BranchWithMergeQueuesEnabled pr, DateTime time)
     {
-        var prWasHead = Queue.Last() == pr;
+        var prWasHead = Queue.LastOrDefault() == pr;
         Queue.Remove(pr);
         Statuses.Remove(pr);
         if (!Queue.Any()) return;
@@ -148,20 +145,22 @@ public class MergeQueue(PriorityQueue<IEvent, DateTime> events)
             // If build failed, we shouldn't be here because OnFailure would have removed it from the queue
             Debug.Assert(Statuses[Queue.Last()] == BuildStatus.Passed, "The head of the queue should have a successful build");
             // If build succeeded, merge the rest of the queue
-            OnSuccess(Queue.Last());
+            OnSuccess(Queue.Last(), time);
         }
         else
         {
             // Rebase head of queue, triggering a new build
-            events.Enqueue(new MergeQueueBuildStartedEvent(events, _ => OnSuccess(Queue.Last()), finishTime => RemoveBranchFromQueue(pr, finishTime)), time);
+            var newHead = Queue.Last();
+            var build = new MergeQueueBuildStartedEvent(events, t => OnSuccess(newHead, t), finishTime => RemoveBranchFromQueue(pr, finishTime));
+            build.Start(time, $"PR {pr.BranchId} removed from merge queue; rebasing head of queue PR {newHead.BranchId}");
         }
     }
 
-    private void OnSuccess(BranchWithMergeQueuesEnabled pr)
+    private void OnSuccess(BranchWithMergeQueuesEnabled pr, DateTime time)
     {
-        if (pr != Queue.Last())
+        if (pr != Queue.LastOrDefault())
         {
-            Console.WriteLine($"Merge queue build for branch #{pr.BranchId} is obsolete. Maybe if the head of the queue fails we'll merge anyway?");
+            Console.WriteLine($"{time}: Merge queue build for branch #{pr.BranchId} is obsolete. Maybe if the head of the queue fails we'll merge anyway?");
             Statuses[pr] = BuildStatus.Passed;
             return;
         }
@@ -175,6 +174,7 @@ public class MergeQueue(PriorityQueue<IEvent, DateTime> events)
 
         Queue.Clear();
         // No branches get rebased as a result of a successful merge
+        Repo.RenovateCreatesNewBranches(time);
     }
 }
 
@@ -185,9 +185,7 @@ public enum BuildStatus
     Failed
 }
 
-public class MergeQueueBuildStartedEvent(PriorityQueue<IEvent, DateTime> events, Action<DateTime> onSuccess, Action<DateTime> onFailure) : BuildStartedEvent(events, onSuccess, onFailure)
-{
-}
+public class MergeQueueBuildStartedEvent(PriorityQueue<IEvent, DateTime> events, Action<DateTime> onSuccess, Action<DateTime> onFailure) : BuildStartedEvent(events, onSuccess, onFailure);
 
 public class Repo(PriorityQueue<IEvent, DateTime> events)
 {
@@ -201,6 +199,15 @@ public class Repo(PriorityQueue<IEvent, DateTime> events)
         var renovateBranch = new BranchWithMergeQueuesEnabled(++NextBranchId, events, MergeQueue);
         renovateBranch.Push(startTime);
         Branches.Add(renovateBranch);
+    }
+
+    public void RenovateCreatesNewBranches(DateTime startTime)
+    {
+        while (Branches.Count < 3)
+        {
+            PushNewBranch(startTime);
+            startTime += TimeSpan.FromMinutes(3);
+        }
     }
 }
 
