@@ -37,6 +37,16 @@ public class MergeWhenGreenProcessor(GitRepo repo) : IProcessor
     }
 }
 
+public class AddToMergeQueueWhenGreenProcessor(GitRepoWithMergeQueue repo) : IProcessor
+{
+    public IEnumerable<(Event, TimeSpan)> HandleEvent(Event e)
+    {
+        if (e is not BuildSuccessfulEvent bse) yield break;
+        if (bse.Commit != repo.Branches[bse.Branch] || bse.Branch == "main" || bse.Branch.StartsWith("queue")) yield break;
+        yield return repo.AddToMergeQueue(bse.Branch);
+    }
+}
+
 public class RenovatePrGenerationProcessor(GitRepo repo) : IProcessor
 {
     private static readonly TimeSpan Interval = TimeSpan.FromHours(1);

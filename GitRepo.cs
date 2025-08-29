@@ -3,7 +3,7 @@
 public class GitRepo
 {
     public GitRepo() => _branches["main"] = new GitCommit([], "Initial commit");
-    private readonly Dictionary<string, GitCommit> _branches = new();
+    protected readonly Dictionary<string, GitCommit> _branches = new();
     public IReadOnlyDictionary<string, GitCommit> Branches => _branches;
 
     public int CountBranchesMergedIntoMain
@@ -38,6 +38,18 @@ public class GitRepo
         var commit = new GitCommit([_branches["main"]], branch);
         _branches[branch] = commit;
         yield return new BuildTriggeredEvent(commit, branch);
+    }
+}
+
+public class GitRepoWithMergeQueue : GitRepo
+{
+    private readonly List<(GitCommit, string)> _mergeQueue = new();
+    public (Event, TimeSpan) AddToMergeQueue(string branch)
+    {
+        var mergeCommit = new GitCommit([_mergeQueue.Last().Item1, Branches[branch]], $"Merge {branch}");
+        _mergeQueue.Add((mergeCommit, branch));
+        _branches[$"queue/{branch}"] = mergeCommit;
+        return (new BuildTriggeredEvent(mergeCommit, $"queue/{branch}"), TimeSpan.Zero);
     }
 }
 

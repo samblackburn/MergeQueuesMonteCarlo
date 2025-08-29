@@ -1,7 +1,8 @@
 ﻿using MergeQueuesMonteCarlo;
 
+var mergeQueues = true;
 
-var repo = new GitRepo();
+var repo = new GitRepoWithMergeQueue();
 var buildStatus = new Dictionary<GitCommit, BuildStatus>();
 
 var eventQueue = new PriorityQueue<Event, DateTime>();
@@ -10,14 +11,23 @@ eventQueue.Enqueue(new CheckForFailingBuildsEvent(), DateTime.Today.AddHours(9))
 
 var history = new List<(DateTime time, Event evt)>();
 
-var processors = new List<IProcessor>
-{
-    new BuildStartProcessor(),
-    new BuildCompletedProcessor(buildStatus),
-    new MergeWhenGreenProcessor(repo),
-    new RenovatePrGenerationProcessor(repo),
-    new ManualRetryBuildProcessor(repo, buildStatus)
-};
+var processors = mergeQueues
+    ? new List<IProcessor>
+    {
+        new BuildStartProcessor(),
+        new BuildCompletedProcessor(buildStatus),
+        new AddToMergeQueueWhenGreenProcessor(repo),
+        new RenovatePrGenerationProcessor(repo),
+        new ManualRetryBuildProcessor(repo, buildStatus)
+    }
+    : new List<IProcessor>
+    {
+        new BuildStartProcessor(),
+        new BuildCompletedProcessor(buildStatus),
+        new MergeWhenGreenProcessor(repo),
+        new RenovatePrGenerationProcessor(repo),
+        new ManualRetryBuildProcessor(repo, buildStatus)
+    };
 
 var weekdays = TimeSpan.FromDays(5);
 while (eventQueue.TryDequeue(out var eventItem, out var time) && time < DateTime.Today + weekdays)
