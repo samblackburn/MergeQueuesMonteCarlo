@@ -1,10 +1,12 @@
 ﻿using System.Diagnostics;
 
-var events = new PriorityQueue<Build, DateTime>();
+var events = new PriorityQueue<IEvent, DateTime>();
 var repo = new Repo(events);
 repo.PushNewBranch(DateTime.Today);
 repo.PushNewBranch(DateTime.Today + TimeSpan.FromMinutes(3));
 repo.PushNewBranch(DateTime.Today + TimeSpan.FromMinutes(6));
+var firstTimeToManuallyCheckBuilds = DateTime.Today + TimeSpan.FromHours(9);
+events.Enqueue(new RetryFailingBuildsEvent(events, firstTimeToManuallyCheckBuilds, repo), firstTimeToManuallyCheckBuilds);
 var maxParallelBranches = 0;
 
 for(int i=0; i<400; i++)
@@ -19,25 +21,30 @@ for(int i=0; i<400; i++)
     e.OnFinished();
 }
 
-Console.WriteLine($"{Build.NextBuildId} builds were started and {repo.NextBranchId - repo.Branches.Count} branches were merged. There were {Build.NextBuildId/(repo.NextBranchId - repo.Branches.Count)} builds per merge.");
+Console.WriteLine($"{BuildStartedEvent.NextBuildId} builds were started and {repo.NextBranchId - repo.Branches.Count} branches were merged. ");
+Console.WriteLine($"There were {BuildStartedEvent.NextBuildId/((float)repo.NextBranchId - repo.Branches.Count)} branch builds per merge.");
 Console.WriteLine($"Maximum parallel branches: {maxParallelBranches}");
 
 
-public class Build(PriorityQueue<Build, DateTime> events, Action<DateTime> onSuccess, Action<DateTime> onFailure)
+public class BuildStartedEvent(PriorityQueue<IEvent, DateTime> events, Action<DateTime> onSuccess, Action<DateTime> onFailure) : IEvent
 {
     public static int NextBuildId { get; private set; }
-    protected virtual TimeSpan Duration => TimeSpan.FromHours(2);
+    
+    /// <summary>
+    /// Uniform distribution between 1 and 3 hours
+    /// </summary>
+    protected virtual TimeSpan Duration => TimeSpan.FromHours(1) + TimeSpan.FromHours(2) * Random.Shared.NextDouble();
     protected virtual double SuccessRate => 0.5;
 
     private readonly int _buildId = ++NextBuildId;
-    private DateTime _endTime;
+    public DateTime EndTime { get; private set; }
     public bool IsObsolete { get; set; }
 
-    public void Start(DateTime startTime)
+    public void Start(DateTime startTime, string message)
     {
-        _endTime = startTime + Duration;
-        events.Enqueue(this, _endTime);
-        Console.WriteLine($"{startTime}: Build #{_buildId} started.");
+        EndTime = startTime + Duration;
+        events.Enqueue(this, EndTime);
+        Console.WriteLine($"{startTime}: {message}; build #{_buildId} started.");
     }
 
     public void OnFinished()
@@ -46,71 +53,86 @@ public class Build(PriorityQueue<Build, DateTime> events, Action<DateTime> onSuc
         {
             if (!IsObsolete)
             {
-                Console.WriteLine($"{_endTime}: Build #{_buildId} succeeded");
-                onSuccess(_endTime);
+                Console.WriteLine($"{EndTime}: Build #{_buildId} succeeded");
+                onSuccess(EndTime);
             }
             else
             {
-                Console.WriteLine($"{_endTime}: Build #{_buildId} succeeded but obsolete");
+                Console.WriteLine($"{EndTime}: Build #{_buildId} succeeded but obsolete");
             }
         }
         else
         {
-            Console.WriteLine($"{_endTime}: Build #{_buildId} failed");
-            onFailure(_endTime);
+            Console.WriteLine($"{EndTime}: Build #{_buildId} failed");
+            onFailure(EndTime);
         }
     }
 }
 
-internal class RetryBuild : Build
+internal class RetryFailingBuildsEvent(PriorityQueue<IEvent, DateTime> events, DateTime checkTime, Repo repo) : IEvent
 {
-    public RetryBuild(PriorityQueue<Build,DateTime> events, Action<DateTime> onSuccess, Action<DateTime> onFailure) : base(events, onSuccess, onFailure)
+    public void OnFinished()
     {
+        var nextTimeToCheck = checkTime + TimeSpan.FromDays(1);
+        events.Enqueue(new RetryFailingBuildsEvent(events, nextTimeToCheck, repo), nextTimeToCheck);
+        RetryAllFailingBranches();
     }
-    
-    protected override TimeSpan Duration => TimeSpan.FromMinutes(30);
-    protected override double SuccessRate => 0.9;
+
+    private void RetryAllFailingBranches()
+    {
+        foreach (var branch in repo.Branches)
+        {
+            branch.ManualRetry(checkTime);
+        }
+    }
 }
 
-public class RenovateBranch(int branchId, PriorityQueue<Build, DateTime> events, Repo repo)
+public class RenovateBranch(int branchId, PriorityQueue<IEvent, DateTime> events, Repo repo)
 {
-    private Build? _currentBuild; 
+    private BuildStartedEvent? _currentBuild; 
 
     public void Push(DateTime startTime)
     {
         if (_currentBuild != null) _currentBuild.IsObsolete = true;
         
-        Console.WriteLine($"{startTime}: Branch #{branchId} pushed");
-        _currentBuild = new Build(events, OnSuccess, OnFailure);
-        _currentBuild.Start(startTime);
+        _currentBuild = new BuildStartedEvent(events, OnSuccess, OnFailure);
+        _currentBuild.Start(startTime, $"Branch #{branchId} pushed");
     }
 
     private void OnFailure(DateTime obj)
     {
-        Debug.Assert(_currentBuild != null, "There must be a build for it to have failed.");
-        
-        // At 9am the next day, a human hits run on the couple of projects that failed
-        var nextMorning = obj.Date + TimeSpan.FromHours(9) + TimeSpan.FromDays(1);
-        Console.WriteLine($"{nextMorning}: Manual retry for branch #{branchId}");
-        _currentBuild = new RetryBuild(events, OnSuccess, OnFailure);
-        _currentBuild.Start(nextMorning);
     }
 
     private void OnSuccess(DateTime time)
     {
-        Console.WriteLine($"branch #{branchId} merged and deleted. Rebasing {repo.Branches.Count} other branches...");
         repo.Branches.Remove(this);
+        Console.WriteLine($"branch #{branchId} merged and deleted. Rebasing {repo.Branches.Count} other branches...");
         foreach (var branch in repo.Branches)
         {
             branch.Push(time);
         }
-        
-        // At this point Renovate will create a new branch from the rate-limited queue
+
+        Console.WriteLine($"{time}: Renovate creates a new branch from the rate-limited queue");
         repo.PushNewBranch(time);
+    }
+
+    public void ManualRetry(DateTime checkTime)
+    {
+        Debug.Assert(_currentBuild != null, "There should be a build to retry");
+        Debug.Assert(!_currentBuild.IsObsolete, "The build should not be obsolete");
+        
+        if (_currentBuild.EndTime > checkTime)
+        {
+            // Build is still running
+            return;
+        }
+        
+        _currentBuild = new BuildStartedEvent(events, OnSuccess, OnFailure);
+        _currentBuild.Start(checkTime, $"Manually retrying branch #{branchId}");
     }
 }
 
-public class Repo(PriorityQueue<Build, DateTime> events)
+public class Repo(PriorityQueue<IEvent, DateTime> events)
 {
     public HashSet<RenovateBranch> Branches = new();
     public int NextBranchId { get; private set; }
@@ -121,4 +143,9 @@ public class Repo(PriorityQueue<Build, DateTime> events)
         renovateBranch.Push(startTime);
         Branches.Add(renovateBranch);
     }
+}
+
+public interface IEvent
+{
+    public void OnFinished();
 }
