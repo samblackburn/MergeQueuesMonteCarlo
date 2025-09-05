@@ -39,6 +39,13 @@ public class GitRepo
         _branches[branch] = commit;
         yield return new BuildTriggeredEvent(commit, branch);
     }
+
+    public (Event, TimeSpan) RebaseBranch(string branch)
+    {
+        var commit = new GitCommit([_branches["main"], _branches[branch]], $"Merge main into {branch}");
+        _branches[branch] = commit;
+        return (new BuildTriggeredEvent(commit, branch), TimeSpan.Zero);
+    }
 }
 
 public class GitRepoWithMergeQueue : GitRepo
@@ -55,5 +62,7 @@ public class GitRepoWithMergeQueue : GitRepo
 
 public record GitCommit(IEnumerable<GitCommit> Parents, string Message)
 {
+    private readonly HashSet<GitCommit> _allAncestors = [..Parents.SelectMany(p => p._allAncestors.Append(p))]; 
     public override string ToString() => Message;
+    public bool HasAncestor(GitCommit needle) => _allAncestors.Contains(needle);
 }

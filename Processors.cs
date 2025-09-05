@@ -27,12 +27,26 @@ public class BuildCompletedProcessor(Dictionary<GitCommit, BuildStatus> buildSta
     }
 }
 
-public class MergeWhenGreenProcessor(GitRepo repo) : IProcessor
+public class MergeWhenGreenProcessor(GitRepo repo, bool autoRebase) : IProcessor
 {
     public IEnumerable<(Event, TimeSpan)> HandleEvent(Event e)
     {
         if (e is not BuildSuccessfulEvent bse) yield break;
-        if (bse.Commit != repo.Branches[bse.Branch] || bse.Branch == "main") yield break;
+        if (bse.Branch == "main") yield break;
+        if (bse.Commit != repo.Branches[bse.Branch])
+        {
+            Console.WriteLine($"    Obsolete build succeeded for {bse.Branch}");
+            yield break;
+        }
+
+        if (autoRebase && !bse.Commit.HasAncestor(repo.Branches["main"]))
+        {
+            Console.WriteLine($"    Rebasing {bse.Branch} onto main");
+            yield return repo.RebaseBranch(bse.Branch);
+            yield break;
+        }
+        
+        Console.WriteLine($"    Merging {bse.Branch} into main");
         yield return repo.Merge(bse.Branch);
     }
 }
@@ -59,6 +73,7 @@ public class RenovatePrGenerationProcessor(GitRepo repo) : IProcessor
         {
             foreach (var evt in repo.MakeNewBranch())
             {
+                Console.WriteLine("    Renovate creates a new PR");
                 yield return (evt, TimeSpan.Zero);
             }
         }
