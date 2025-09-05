@@ -24,12 +24,12 @@ public class GitRepo
 
     private int _branchNumber;
 
-    public (Event, TimeSpan) Merge(string branch)
+    public virtual IEnumerable<(Event, TimeSpan)> Merge(string branch)
     {
         var newMainCommit = new GitCommit([_branches["main"], _branches[branch]], $"Merge {branch}");
         _branches["main"] = newMainCommit;
         _branches.Remove(branch);
-        return (new BuildTriggeredEvent(newMainCommit, "main"), TimeSpan.Zero);
+        yield return (new BuildTriggeredEvent(newMainCommit, "main"), TimeSpan.Zero);
     }
 
     public IEnumerable<Event> MakeNewBranch()
@@ -48,15 +48,49 @@ public class GitRepo
     }
 }
 
-public class GitRepoWithMergeQueue : GitRepo
+public class GitRepoWithMergeQueue(IReadOnlyDictionary<GitCommit, BuildStatus> statuses) : GitRepo
 {
     private readonly List<(GitCommit, string)> _mergeQueue = new();
-    public (Event, TimeSpan) AddToMergeQueue(string branch)
+    public IEnumerable<(Event, TimeSpan)> AddToMergeQueue(string branch)
     {
-        var mergeCommit = new GitCommit([_mergeQueue.Last().Item1, Branches[branch]], $"Merge {branch}");
+        if (_mergeQueue.Any(q => q.Item2 == branch)) yield break;
+        var mergeCommit = _mergeQueue.Any()
+            ? new GitCommit([_mergeQueue.Last().Item1, Branches[branch]], $"Merge {branch}")
+            : Branches[branch];
         _mergeQueue.Add((mergeCommit, branch));
         _branches[$"queue/{branch}"] = mergeCommit;
-        return (new BuildTriggeredEvent(mergeCommit, $"queue/{branch}"), TimeSpan.Zero);
+        Console.WriteLine($"    {branch} added to merge queue");
+        yield return (new BuildTriggeredEvent(mergeCommit, $"queue/{branch}"), TimeSpan.Zero);
+    }
+
+    public override IEnumerable<(Event, TimeSpan)> Merge(string branch)
+    {
+        if (!branch.StartsWith("queue/")) throw new Exception("Can only merge via queues");
+        
+        var headOfQueue = _mergeQueue.LastOrDefault();
+        if (headOfQueue == default) throw new Exception("Merge queue build succeeded but queue somehow empty");
+        if (headOfQueue.Item1 != Branches[branch]) yield break;
+        
+        Console.WriteLine($"    Pushing queue with {_mergeQueue.Count} items to main");
+        _branches["main"] = headOfQueue.Item1;
+        _mergeQueue.Clear();
+        yield return (new BuildTriggeredEvent(headOfQueue.Item1, "main"), TimeSpan.Zero);
+    }
+
+    public IEnumerable<(Event, TimeSpan)> Reject(GitCommit commit)
+    {
+        var failingHead = _mergeQueue.LastOrDefault();
+        if (failingHead.Item1 != commit) return [];
+        _mergeQueue.Remove(failingHead);
+
+        var headOfRemainingQueue = _mergeQueue.LastOrDefault();
+        if (statuses.TryGetValue(headOfRemainingQueue.Item1, out var status) && status == BuildStatus.Success)
+        {
+            Console.WriteLine($"    {failingHead.Item2} failed but {headOfRemainingQueue.Item2} is green, pushing to main");
+            return Merge(headOfRemainingQueue.Item2);
+        }
+
+        return [];
     }
 }
 

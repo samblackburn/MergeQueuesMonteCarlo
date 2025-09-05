@@ -2,8 +2,8 @@
 
 var mergeQueues = true;
 
-var repo = new GitRepoWithMergeQueue();
 var buildStatus = new Dictionary<GitCommit, BuildStatus>();
+var repo = new GitRepoWithMergeQueue(buildStatus);
 
 var eventQueue = new PriorityQueue<Event, DateTime>();
 var start = new DateTime(2025, 1, 1);

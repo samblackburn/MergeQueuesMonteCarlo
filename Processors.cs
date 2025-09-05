@@ -47,7 +47,7 @@ public class MergeWhenGreenProcessor(GitRepo repo, bool autoRebase) : IProcessor
         }
         
         Console.WriteLine($"    Merging {bse.Branch} into main");
-        yield return repo.Merge(bse.Branch);
+        foreach (var tuple in repo.Merge(bse.Branch)) yield return tuple;
     }
 }
 
@@ -55,9 +55,21 @@ public class AddToMergeQueueWhenGreenProcessor(GitRepoWithMergeQueue repo) : IPr
 {
     public IEnumerable<(Event, TimeSpan)> HandleEvent(Event e)
     {
-        if (e is not BuildSuccessfulEvent bse) yield break;
-        if (bse.Commit != repo.Branches[bse.Branch] || bse.Branch == "main" || bse.Branch.StartsWith("queue")) yield break;
-        yield return repo.AddToMergeQueue(bse.Branch);
+        if (e is not BuildSuccessfulEvent bse) return [];
+        if (bse.Commit != repo.Branches[bse.Branch] || bse.Branch == "main") return [];
+        if (!bse.Branch.StartsWith("queue"))
+            return repo.AddToMergeQueue(bse.Branch);
+        else
+            return repo.Merge(bse.Branch);
+    }
+}
+
+public class RemoveFromMergeQueueWhenRedProcessor(GitRepoWithMergeQueue repo) : IProcessor
+{
+    public IEnumerable<(Event, TimeSpan)> HandleEvent(Event e)
+    {
+        if (e is not BuildFailedEvent bfe) yield break;
+        foreach (var tuple in repo.Reject(bfe.Commit)) yield return tuple;
     }
 }
 
